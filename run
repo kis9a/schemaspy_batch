@@ -1,0 +1,322 @@
+#!/bin/bash
+
+## functions
+log_err() {
+  echo -e "${RED}[ERROR]: $1${CF}" 1>&2
+}
+
+log_info() {
+  echo -e "[INFO]: $1 "
+}
+
+log_debug() {
+  if [[ "$DEBUG" == true ]]; then
+    echo -e "[DEBUG]: $1 " # >/dev/tty
+  fi
+}
+
+is_err() {
+  if [[ $? -gt 0 ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+is_exists() {
+  which "$1" >/dev/null 2>&1
+  return $?
+}
+
+is_exists_file() {
+  if [[ -e "$1" ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+is_empty_string() {
+  if [[ $1 == "" ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+err_exit() {
+  log_err "$1"
+  if [[ -z "$2" ]]; then
+    exit 1
+  else
+    exit "$2"
+  fi
+}
+
+exit_health() {
+  if [[ -n "$1" ]]; then
+    log_info "$1"
+  fi
+  exit 0
+}
+
+exit_quit() {
+  log_err "quit" 1>&2
+  exit 1
+}
+
+sqs_queues() {
+  if [[ -z "$AWS_PROFILE" ]]; then
+    aws sqs list-queues --output json --region "$AWS_REGION"
+  else
+    aws sqs list-queues --output json --region "$AWS_REGION" --profile "$AWS_PROFILE"
+  fi
+}
+
+sqs_delete_message() {
+  if [[ -z "$AWS_PROFILE" ]]; then
+    aws sqs delete-message --output json --queue-url "$SQS_URL" --receipt-handle "$1" --region "$AWS_REGION"
+  else
+    aws sqs delete-message --output json --queue-url "$SQS_URL" --receipt-handle "$1" --region "$AWS_REGION" --profile "$AWS_PROFILE"
+  fi
+}
+
+sqs_recieve_message() {
+  if [[ -z "$AWS_PROFILE" ]]; then
+    aws sqs receive-message --output json --queue-url "$SQS_URL" --region "$AWS_REGION"
+  else
+    aws sqs receive-message --output json --queue-url "$SQS_URL" --region "$AWS_REGION" --profile "$AWS_PROFILE"
+  fi
+}
+
+get_message_receipt() {
+  printf "%s" "$1" | jq -r '.Messages | .[] .ReceiptHandle'
+}
+
+get_message_body() {
+  printf "%s" "$1" | jq -r '.Messages | .[] .Body'
+}
+
+get_all_targets() {
+  local msg
+  local receipt
+  local body
+  msg="$(sqs_recieve_message)"
+
+  if [[ -n "$msg" ]]; then
+    receipt="$(get_message_receipt "$msg")"
+    sqs_delete_message "$receipt"
+
+    body="$(get_message_body "$msg")"
+    TARGETS+=("$body")
+
+    get_all_targets
+  else
+    printf "%s\n" "${TARGETS[@]}" | sort -u | uniq
+  fi
+}
+
+clean_schema_outputs() {
+  rm -rf "$SCHEMASPY_OUTPUT"
+  mkdir -p "$SCHEMASPY_OUTPUT"
+  return $?
+}
+
+action_scheme() {
+  local targets
+
+  log_debug "START get_all_targets"
+  targets="$(get_all_targets)"
+  if is_err; then
+    err_exit "failed get all targets from sqs"
+  fi
+
+  log_debug "TARGETS:\n$targets"
+
+  if is_empty_string "$targets"; then
+    exit_health "targets is not found"
+  fi
+
+  while read -r t; do
+    if ! clean_schema_outputs; then
+      log_err "failed clean schema outputs directory"
+      continue
+    fi
+
+    log_info "run_scheme: $t"
+    if ! run_scheme "$t"; then
+      log_err "failed run scheme $t"
+      continue
+    fi
+
+    log_info "s3 sync: $t"
+    if ! run_s3_sync "$t"; then
+      log_err "failed S3 sync $t"
+      continue
+    fi
+  done <<<"$targets"
+}
+
+run_s3_sync() {
+  if [[ -z "$AWS_PROFILE" ]]; then
+    (cd "$SCHEMASPY_OUTPUT" && aws s3 sync . "s3://$S3_BUCKET_NAME/$1")
+  else
+    (cd "$SCHEMASPY_OUTPUT" && aws s3 sync . "s3://$S3_BUCKET_NAME/$1" --region "$AWS_REGION" --profile "$AWS_PROFILE")
+  fi
+  return "$?"
+}
+
+run_scheme() {
+  local kind
+  local host
+  local user
+  local db_name
+  local password
+  local schema_name
+
+  case "$APP_ENV" in
+    "$ENV_STG")
+      case "$1" in
+        "example")
+          kind="mysql"
+          user="db_user"
+          host="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxx.rds.amazonaws.com"
+          db_name="db_name"
+          schema_name="schema_name"
+          password="$EXAMPLE_STG_DATABASE_MYSQL_PASSWORD"
+          schemaspy -t $kind -host $host --port 3306 -db $db_name -s $schema_name -u $user -p "$password"
+          return "$?"
+          ;;
+          ## add targets
+        *)
+          printf "Scheme target not found %s\n" "$2" 1>&2
+          return 1
+          ;;
+      esac
+      ;;
+    "$ENV_PROD")
+      SQS_URL="$SQS_URL_PROD"
+      ;;
+  esac
+}
+
+help() {
+  cat <<EOF
+
+USAGE:
+  run [options] [action] [arguments]
+
+OPTIONS:
+  -h|--help: show help
+  -d|--debug: debug
+  -p|--profile: aws profile
+  -r|--region: aws region
+
+ACTIONS:
+  scheme: run schemaspy and update docs
+
+EXAMPLES:
+  $ run scheme
+EOF
+}
+
+## global variables
+### colors
+readonly CF="\\033[0m"
+readonly RED="\\033[0;31m"
+readonly DEFAULT_AWS_REGION="$AWS_REGION"
+readonly DEFAULT_AWS_PROFILE=""
+
+### app_env
+readonly APP_ENV="$APP_ENV"
+readonly ENV_STG="stg"
+readonly ENV_PROD="prod"
+
+### paths
+readonly APP_PATH="/app"
+readonly SCHEMASPY_OUTPUT="$APP_PATH/outputs"
+
+### infra envs
+readonly S3_BUCKET_NAME="xxxxxxxxxxxxxxxxxx"
+readonly SQS_URL_STG="https://sqs.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+readonly SQS_URL_PROD="https://sqs.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+SQS_URL=""
+TARGETS=()
+
+if [[ "$LOG_LEVEL" == "debug" ]]; then
+  DEBUG=true
+else
+  DEBUG=false
+fi
+
+if [[ "$APP_ENV" == "$ENV_STG" ]] || [[ "$APP_ENV" == "$ENV_PROD" ]]; then
+  log_debug "SET APP_ENV $APP_ENV"
+else
+  err_exit "Unknow APP_ENV" 1
+fi
+
+case "$APP_ENV" in
+  "$ENV_STG")
+    SQS_URL="$SQS_URL_STG"
+    ;;
+  "$ENV_PROD")
+    SQS_URL="$SQS_URL_PROD"
+    ;;
+  *)
+    err_exit "Invalid APP_ENV" 1
+    ;;
+esac
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h | --help)
+      help
+      exit_health
+      ;;
+    -d | --debug)
+      DEBUG=true
+      shift
+      ;;
+    -r | --region)
+      AWS_REGION="$2"
+      shift
+      shift
+      ;;
+    -p | --profile)
+      AWS_PROFILE="$2"
+      shift
+      shift
+      ;;
+    *)
+      POSITIONAL_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# restore parameters
+set -- "${POSITIONAL_ARGS[@]}"
+
+if [[ -z "$AWS_REGION" ]]; then
+  AWS_REGION="$DEFAULT_AWS_REGION"
+fi
+
+if [[ -z "$AWS_PROFILE" ]]; then
+  AWS_PROFILE="$DEFAULT_AWS_PROFILE"
+fi
+
+case "$1" in
+  "scheme")
+    action_scheme "$@"
+    ;;
+  "help")
+    help
+    exit_health
+    ;;
+  *)
+    printf "Action not found %s\n" "$2" 1>&2
+    help
+    exit_health
+    ;;
+esac

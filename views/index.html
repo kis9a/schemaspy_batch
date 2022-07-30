@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=dev ice-width, initial-scale=1.0" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css"
+    />
+    <title>Schemaspy docs</title>
+    <style>
+      .target:hover {
+        cursor: pointer;
+        text-decoration: underline;
+      }
+      .link:hover {
+        cursor: pointer;
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { h, text, app } from "https://unpkg.com/hyperapp";
+
+      const http = (props) => [
+        (dispatch, props) => {
+          fetch(props.url, props.options)
+            .then((response) =>
+              !response.ok
+                ? (() => {
+                    throw response;
+                  })()
+                : response
+            )
+            .then((response) => response[props.response]())
+            .then((result) => dispatch(props.action, result))
+            .catch((error) => dispatch(props.error, error));
+        },
+        ((source, assign) => {
+          var result = {},
+            i;
+          for (i in source) result[i] = source[i];
+          for (i in assign) result[i] = assign[i];
+          return result;
+        },
+        ({
+          options: {},
+          response: "json",
+          error: props.action,
+        },
+        props)),
+      ];
+
+      app({
+        init: [
+          { targets: [] },
+          http({
+            url: "/targets.json",
+            response: "json",
+            action: (state, json) => {
+              return {
+                ...state,
+                targets: json.targets || [],
+              };
+            },
+          }),
+        ],
+        view: ({ targets }) =>
+          h(
+            "main",
+            {
+              style: {
+                margin: "16px",
+              },
+            },
+            [
+              h("h1", {}, text("dbdocs")),
+              h(
+                "div",
+                {
+                  style: {
+                    display: "flex",
+                    margin: "12px",
+                    "margin-bottom": "200px",
+                    "flex-direction": "column",
+                  },
+                },
+                targets.map((name) =>
+                  h(
+                    "a",
+                    {
+                      class: "target",
+                      style: {
+                        padding: "8px",
+                        "margin-bottom": "8px",
+                      },
+                      onclick: (state) => {
+                        window.location.href = `${name}/index.html`;
+                        return state;
+                      },
+                    },
+                    text(name)
+                  )
+                )
+              ),
+            ]
+          ),
+        node: document.getElementById("app"),
+      });
+    </script>
+  </body>
+</html>

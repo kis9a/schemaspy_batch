@@ -1,0 +1,7 @@
+version: "3.9"
+
+services:
+  shfmt:
+    image: mvdan/shfmt:latest-alpine
+    volumes:
+      - .:/src
